@@ -1,49 +1,85 @@
-/************************************************************************/
-/* includes                                                             */
-/************************************************************************/
-
 #include <asf.h>
-#include <stdlib.h>
-#include <string.h>
 #include "conf_board.h"
+
 #include "gfx_mono_ug_2832hsweg04.h"
 #include "gfx_mono_text.h"
 #include "sysfont.h"
 
-/************************************************************************/
-/* IOS                                                                  */
-/************************************************************************/
+//DEFINES DO MOTOR
+#define IN1_PIO     PIOD
+#define IN1_PIO_ID  ID_PIOD
+#define IN1_PIO_PIN 30
+#define IN1_PIO_PIN_MASK (1 << IN1_PIO_PIN)
 
-#define BTN_PIO PIOA
-#define BTN_PIO_ID ID_PIOA
-#define BTN_PIO_PIN 11
-#define BTN_PIO_PIN_MASK (1 << BTN_PIO_PIN)
+#define IN2_PIO     PIOA
+#define IN2_PIO_ID  ID_PIOA
+#define IN2_PIO_PIN 6
+#define IN2_PIO_PIN_MASK (1 << IN2_PIO_PIN)
 
+#define IN3_PIO     PIOC
+#define IN3_PIO_ID  ID_PIOC
+#define IN3_PIO_PIN 19
+#define IN3_PIO_PIN_MASK (1 << IN3_PIO_PIN)
 
+#define IN4_PIO     PIOA
+#define IN4_PIO_ID  ID_PIOA
+#define IN4_PIO_PIN 2
+#define IN4_PIO_PIN_MASK (1 << IN4_PIO_PIN)
 
-/************************************************************************/
-/* prototypes and types                                                 */
-/************************************************************************/
+//DEFINES DOS BOTÕES DA PLACA OLED
+#define BUT_1_PIO				PIOD
+#define BUT_1_PIO_ID			ID_PIOD
+#define BUT_1_PIO_IDX			28
+#define BUT_1_PIO_IDX_MASK		(1u << BUT_1_PIO_IDX)
 
-void btn_init(void);
-void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource);
+#define BUT_2_PIO PIOC
+#define BUT_2_PIO_ID ID_PIOC
+#define BUT_2_PIO_IDX 31
+#define BUT_2_PIO_IDX_MASK (1u << BUT_2_PIO_IDX)
 
-/************************************************************************/
-/* rtos vars                                                            */
-/************************************************************************/
+#define BUT_3_PIO PIOA
+#define BUT_3_PIO_ID ID_PIOA
+#define BUT_3_PIO_IDX 19
+#define BUT_3_PIO_IDX_MASK (1u << BUT_3_PIO_IDX)
 
+/** RTOS  */
+#define TASK_MODO_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
+#define TASK_MODO_STACK_PRIORITY            (tskIDLE_PRIORITY)
 
-/************************************************************************/
-/* RTOS application funcs                                               */
-/************************************************************************/
-#define TASK_OLED_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
-#define TASK_OLED_STACK_PRIORITY            (tskIDLE_PRIORITY)
+#define TASK_MOTOR_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
+#define TASK_MOTOR_STACK_PRIORITY            (tskIDLE_PRIORITY)
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,  signed char *pcTaskName);
 extern void vApplicationIdleHook(void);
 extern void vApplicationTickHook(void);
 extern void vApplicationMallocFailedHook(void);
 extern void xPortSysTickHandler(void);
+
+/************************/
+/* recursos RTOS                                                        */
+/************************/
+
+QueueHandle_t xQueueModo;
+QueueHandle_t xQueueSteps;
+QueueHandle_t xQueuePlay;
+QueueHandle_t xQueueCoin;
+SemaphoreHandle_t xSemaphoreRTT;
+
+/** prototypes */
+void but1_callback(void);
+void but2_callback(void);
+void but3_callback(void);
+static void BUT_init(void);
+static void MOTOR_init(void);
+void fase0(void);
+void fase1(void);
+void fase2(void);
+void fase3(void);
+static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource);
+
+/************************/
+/* RTOS application funcs                                               */
+/************************/
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask, signed char *pcTaskName) {
 	printf("stack overflow %x %s\r\n", pxTask, (portCHAR *)pcTaskName);
@@ -58,94 +94,148 @@ extern void vApplicationMallocFailedHook(void) {
 	configASSERT( ( volatile void * ) NULL );
 }
 
-/************************************************************************/
+/************************/
 /* handlers / callbacks                                                 */
-/************************************************************************/
+/************************/
 
-void but_callback(void) {
+void but1_callback(void) {
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	int angulo = 180;
+	xQueueSendFromISR(xQueueModo, &angulo, &xHigherPriorityTaskWoken);
+}
 
+void but2_callback(void) {
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	int angulo = 90;
+	xQueueSendFromISR(xQueueModo, &angulo, &xHigherPriorityTaskWoken);
+}
+
+void but3_callback(void) {
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	int angulo = 45;
+	xQueueSendFromISR(xQueueModo, &angulo, &xHigherPriorityTaskWoken);
 }
 
 
-/************************************************************************/
-/* TASKS                                                                */
-/************************************************************************/
-
-
-static void task_debug(void *pvParameters) {
-	gfx_mono_ssd1306_init();
-
-	for (;;) {
-		gfx_mono_draw_filled_circle(10,10,4,1,GFX_WHOLE);
-		vTaskDelay(150);
-		gfx_mono_draw_filled_circle(10,10,4,0,GFX_WHOLE);
-		vTaskDelay(150);
-
-	}
-}
-
-
-
-/************************************************************************/
-/* funcoes                                                              */
-/************************************************************************/
-
-void btn_init(void) {
-	// Inicializa clock do periférico PIO responsavel pelo botao
-	pmc_enable_periph_clk(BTN_PIO_ID);
-
-	// Configura PIO para lidar com o pino do botão como entrada
-	// com pull-up
-	pio_configure(BTN_PIO, PIO_INPUT, BTN_PIO_PIN_MASK, PIO_PULLUP | PIO_DEBOUNCE);
-	pio_set_debounce_filter(BTN_PIO, BTN_PIO_PIN_MASK, 60);
+void RTT_Handler(void){
+	RTT_init(1000, 100, RTT_MR_ALMIEN);
 	
-	// Configura interrupção no pino referente ao botao e associa
-	// função de callback caso uma interrupção for gerada
-	// a função de callback é a: but_callback()
-	pio_handler_set(BTN_PIO,
-	BTN_PIO_ID,
-	BTN_PIO_PIN_MASK,
-	PIO_IT_FALL_EDGE,
-	but_callback);
+	uint32_t ul_status;
+	ul_status = rtt_get_status(RTT);
 
-	// Ativa interrupção e limpa primeira IRQ gerada na ativacao
-	pio_enable_interrupt(BTN_PIO, BTN_PIO_PIN_MASK);
-	pio_get_interrupt_status(BTN_PIO);
-
-	// Configura NVIC para receber interrupcoes do PIO do botao
-	// com prioridade 4 (quanto mais próximo de 0 maior)
-	NVIC_EnableIRQ(BTN_PIO_ID);
-	NVIC_SetPriority(BTN_PIO_ID, 4); // Prioridade 4
-}
-
-
-void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource) {
-
-	uint16_t pllPreScale = (int)(((float)32768) / freqPrescale);
-
-	rtt_sel_source(RTT, false);
-	rtt_init(RTT, pllPreScale);
-
-	if (rttIRQSource & RTT_MR_ALMIEN) {
-		uint32_t ul_previous_time;
-		ul_previous_time = rtt_read_timer_value(RTT);
-		while (ul_previous_time == rtt_read_timer_value(RTT))
-		;
-		rtt_write_alarm_time(RTT, IrqNPulses + ul_previous_time);
+	/* IRQ due to Alarm */
+	if ((ul_status & RTT_SR_ALMS) == RTT_SR_ALMS) {
+		BaseType_t xHigherPriorityTaskWoken = pdTRUE;
+		xSemaphoreGiveFromISR(xSemaphoreRTT, &xHigherPriorityTaskWoken);
 	}
-
-	/* config NVIC */
-	NVIC_DisableIRQ(RTT_IRQn);
-	NVIC_ClearPendingIRQ(RTT_IRQn);
-	NVIC_SetPriority(RTT_IRQn, 4);
-	NVIC_EnableIRQ(RTT_IRQn);
-
-	/* Enable RTT interrupt */
-	if (rttIRQSource & (RTT_MR_RTTINCIEN | RTT_MR_ALMIEN))
-	rtt_enable_interrupt(RTT, rttIRQSource);
-	else
-	rtt_disable_interrupt(RTT, RTT_MR_RTTINCIEN | RTT_MR_ALMIEN);
 }
+void set_buzzer() {
+	BUT_1_PIO->PIO_SODR = BUT_1_PIO_IDX_MASK;
+}
+
+void clear_buzzer() {
+	BUT_1_PIO->PIO_CODR = BUT_1_PIO_IDX_MASK;
+}
+
+void tone(int freq, int time) {
+	int T = 1000000 / (2 * freq);
+	int quant = (time * 1000) / (T * 2);
+
+	for (int i = 0; i < quant; i++) {
+		set_buzzer();
+		delay_us(T);
+		clear_buzzer();
+		delay_us(T);
+	}
+}
+
+/************************/
+/* TASKS                                                                */
+/************************/
+
+static void task_modo(void *pvParameters) {
+	
+	RTT_init(1000, 5, RTT_MR_ALMIEN);
+	
+	gfx_mono_ssd1306_init();
+	
+	int angulo;
+	char str[128];
+	
+	for (;;)  {
+		if (xQueueReceive(xQueueModo, &(angulo), 1000)) {
+			int passos = angulo / 0.17578125;
+			
+			sprintf(str, "%d", angulo); // (2)
+			gfx_mono_draw_string(str, 50,16, &sysfont);
+			
+			xQueueSend(xQueueSteps, (void *)&passos, 10);
+		}
+	}
+}
+
+static void task_motor(void *pvParameters) {
+	int passos = 0;
+	for (;;)  {
+		if (xQueueReceive(xQueueSteps, &passos, (TickType_t) 0)) {
+			int cont = 0;
+			printf("%d \n", passos);
+			for(int i = 0; i < passos; i++){
+				printf("%d \n", i);
+				if (xSemaphoreTake(xSemaphoreRTT, 1000)) {
+					if(cont == 0){
+						fase0();
+					} else if (cont == 1){
+						fase1();
+					} else if (cont == 2){
+						fase2();
+					} else if (cont == 3){
+						fase3();
+					}
+					
+					cont++;
+					
+					if(cont==4){
+						cont = 0;
+					}
+				}
+			}
+		}
+	}
+}
+
+static void task_coin(void *pvParameters) {
+	int but;
+	for(;;)
+	{
+		if(xQueueReceive(xQueueCoin, &but, 0))
+		{
+			xQueueSend(xQueuePlay, &but, 0);
+		}
+	}
+}
+	
+static void task_play(void *pvParameters) {
+	tone(NOTE_B5,  80);
+	tone(NOTE_E6, 640);
+}
+
+
+static void task_but(void *pvParameters)
+{
+	int but;
+	for(;;)
+	{
+		if(xQueueReceive(xQueueBut, &but, 0))
+		{
+			xQueueSend(xQueueSenha, &but, 0);
+		}
+	}
+}
+
+/************************/
+/* funcoes                                                              */
+/************************/
 
 static void configure_console(void) {
 	const usart_serial_options_t uart_serial_options = {
@@ -162,22 +252,162 @@ static void configure_console(void) {
 	setbuf(stdout, NULL);
 }
 
-/************************************************************************/
+static void BUT_OLED_init(void){
+	//Botão OLED 1
+	pio_configure(BUT_1_PIO, PIO_INPUT, BUT_1_PIO_IDX_MASK, PIO_PULLUP);
+	
+	pio_handler_set(BUT_1_PIO,
+	BUT_1_PIO_ID,
+	BUT_1_PIO_IDX_MASK,
+	PIO_IT_FALL_EDGE,
+	but1_callback);
+	
+	pio_enable_interrupt(BUT_1_PIO, BUT_1_PIO_IDX_MASK);
+	pio_get_interrupt_status(BUT_1_PIO);
+
+	NVIC_EnableIRQ(BUT_1_PIO_ID);
+	NVIC_SetPriority(BUT_1_PIO_ID, 4); // Prioridade 4
+	
+	//Botão OLED 2
+	pio_configure(BUT_2_PIO, PIO_INPUT, BUT_2_PIO_IDX_MASK, PIO_PULLUP);
+	
+	pio_handler_set(BUT_2_PIO,
+	BUT_2_PIO_ID,
+	BUT_2_PIO_IDX_MASK,
+	PIO_IT_FALL_EDGE,
+	but2_callback);
+	
+	pio_enable_interrupt(BUT_2_PIO, BUT_2_PIO_IDX_MASK);
+	pio_get_interrupt_status(BUT_2_PIO);
+
+	NVIC_EnableIRQ(BUT_2_PIO_ID);
+	NVIC_SetPriority(BUT_2_PIO_ID, 4); // Prioridade 4
+	
+	//Botão OLED 3
+	pio_configure(BUT_3_PIO, PIO_INPUT, BUT_3_PIO_IDX_MASK, PIO_PULLUP);
+	
+	pio_handler_set(BUT_3_PIO,
+	BUT_3_PIO_ID,
+	BUT_3_PIO_IDX_MASK,
+	PIO_IT_FALL_EDGE,
+	but3_callback);
+	
+	pio_enable_interrupt(BUT_3_PIO, BUT_3_PIO_IDX_MASK);
+	pio_get_interrupt_status(BUT_3_PIO);
+
+	NVIC_EnableIRQ(BUT_3_PIO_ID);
+	NVIC_SetPriority(BUT_3_PIO_ID, 4); // Prioridade 4
+}
+
+static void MOTOR_init(void){
+	pio_set_output(IN1_PIO, IN1_PIO_PIN_MASK, 0,0,0);
+	pio_set_output(IN2_PIO, IN2_PIO_PIN_MASK, 0,0,0);
+	pio_set_output(IN3_PIO, IN3_PIO_PIN_MASK, 0,0,0);
+	pio_set_output(IN4_PIO, IN4_PIO_PIN_MASK, 0,0,0);
+}
+
+static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource) {
+
+	uint16_t pllPreScale = (int) (((float) 32768) / freqPrescale);
+	
+	rtt_sel_source(RTT, false);
+	rtt_init(RTT, pllPreScale);
+	
+	if (rttIRQSource & RTT_MR_ALMIEN) {
+		uint32_t ul_previous_time;
+		ul_previous_time = rtt_read_timer_value(RTT);
+		while (ul_previous_time == rtt_read_timer_value(RTT));
+		rtt_write_alarm_time(RTT, IrqNPulses+ul_previous_time);
+	}
+
+	/* config NVIC */
+	NVIC_DisableIRQ(RTT_IRQn);
+	NVIC_ClearPendingIRQ(RTT_IRQn);
+	NVIC_SetPriority(RTT_IRQn, 4);
+	NVIC_EnableIRQ(RTT_IRQn);
+
+	/* Enable RTT interrupt */
+	if (rttIRQSource & (RTT_MR_RTTINCIEN | RTT_MR_ALMIEN))
+	rtt_enable_interrupt(RTT, rttIRQSource);
+	else
+	rtt_disable_interrupt(RTT, RTT_MR_RTTINCIEN | RTT_MR_ALMIEN);
+	
+}
+
+void fase0(void){
+	pio_set(IN1_PIO, IN1_PIO_PIN_MASK);
+	pio_clear(IN2_PIO, IN2_PIO_PIN_MASK);
+	pio_clear(IN3_PIO, IN3_PIO_PIN_MASK);
+	pio_clear(IN4_PIO, IN4_PIO_PIN_MASK);
+}
+
+void fase1(void){
+	pio_clear(IN1_PIO, IN1_PIO_PIN_MASK);
+	pio_set(IN2_PIO, IN2_PIO_PIN_MASK);
+	pio_clear(IN3_PIO, IN3_PIO_PIN_MASK);
+	pio_clear(IN4_PIO, IN4_PIO_PIN_MASK);
+}
+
+void fase2(void){
+	pio_clear(IN1_PIO, IN1_PIO_PIN_MASK);
+	pio_clear(IN2_PIO, IN2_PIO_PIN_MASK);
+	pio_set(IN3_PIO, IN3_PIO_PIN_MASK);
+	pio_clear(IN4_PIO, IN4_PIO_PIN_MASK);
+}
+
+void fase3(void){
+	pio_clear(IN1_PIO, IN1_PIO_PIN_MASK);
+	pio_clear(IN2_PIO, IN2_PIO_PIN_MASK);
+	pio_clear(IN3_PIO, IN3_PIO_PIN_MASK);
+	pio_set(IN4_PIO, IN4_PIO_PIN_MASK);
+}
+
+/************************/
 /* main                                                                 */
-/************************************************************************/
+/************************/
+
+
 int main(void) {
 	/* Initialize the SAM system */
 	sysclk_init();
 	board_init();
+	
+	
 
 	/* Initialize the console uart */
 	configure_console();
 	
-	if (xTaskCreate(task_debug, "debug", TASK_OLED_STACK_SIZE, NULL,
-	TASK_OLED_STACK_PRIORITY, NULL) != pdPASS) {
-		printf("Failed to create debug task\r\n");
+	xQueueModo = xQueueCreate(32, sizeof(uint32_t));
+	if (xQueueModo == NULL)
+	printf("falha em criar a queue \n");
+	
+	xQueueCoin = xQueueCreate(32, sizeof(uint32_t));
+	if (xQueueCoin == NULL)
+	printf("falha em criar a queue \n");
+
+	xQueuePlay = xQueueCreate(32, sizeof(uint32_t));
+	if (xQueuePlay == NULL)
+	printf("falha em criar a queue \n");
+	
+	xQueueSteps = xQueueCreate(32, sizeof(uint32_t));
+	if (xQueueSteps == NULL)
+	printf("falha em criar a queue \n");
+
+	xSemaphoreRTT = xSemaphoreCreateBinary();
+	if (xSemaphoreRTT == NULL)
+	printf("falha em criar o semaforo \n");
+
+	if (xTaskCreate(task_modo, "modo", TASK_MODO_STACK_SIZE, NULL, TASK_MODO_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create modo task\r\n");
+	}
+	
+	if (xTaskCreate(task_motor, "motor", TASK_MOTOR_STACK_SIZE, NULL, TASK_MOTOR_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create motor task\r\n");
 	}
 
+	BUT_OLED_init();
+	MOTOR_init();
+	
 	/* Start the scheduler. */
 	vTaskStartScheduler();
 
