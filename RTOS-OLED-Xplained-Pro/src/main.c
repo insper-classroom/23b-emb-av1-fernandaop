@@ -4,6 +4,7 @@
 #include "gfx_mono_ug_2832hsweg04.h"
 #include "gfx_mono_text.h"
 #include "sysfont.h"
+#include <time.h>
 
 //DEFINES DO MOTOR
 #define IN1_PIO     PIOD
@@ -42,12 +43,27 @@
 #define BUT_3_PIO_IDX 19
 #define BUT_3_PIO_IDX_MASK (1u << BUT_3_PIO_IDX)
 
+#define BUZZER_PIO PIOD
+#define BUZZER_PIO_ID ID_PIOD
+#define BUZZER_PIO_IDX 20
+#define BUZZER_PIO_IDX_MASK (1u << BUZZER_PIO_IDX)
+
 /** RTOS  */
 #define TASK_MODO_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
 #define TASK_MODO_STACK_PRIORITY            (tskIDLE_PRIORITY)
 
 #define TASK_MOTOR_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
 #define TASK_MOTOR_STACK_PRIORITY            (tskIDLE_PRIORITY)
+
+#define TASK_COINS_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
+#define TASK_COINS_STACK_PRIORITY            (tskIDLE_PRIORITY)
+
+#define TASK_PLAY_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
+#define TASK_PLAY_STACK_PRIORITY            (tskIDLE_PRIORITY)
+
+/** Notes */
+#define NOTE_B5  988
+#define NOTE_E6  1319
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,  signed char *pcTaskName);
 extern void vApplicationIdleHook(void);
@@ -62,8 +78,10 @@ extern void xPortSysTickHandler(void);
 QueueHandle_t xQueueModo;
 QueueHandle_t xQueueSteps;
 QueueHandle_t xQueuePlay;
-QueueHandle_t xQueueCoin;
+QueueHandle_t xQueueCoins;
 SemaphoreHandle_t xSemaphoreRTT;
+SemaphoreHandle_t xBtnSemaphore;
+
 
 /** prototypes */
 void but1_callback(void);
@@ -130,11 +148,11 @@ void RTT_Handler(void){
 	}
 }
 void set_buzzer() {
-	BUT_1_PIO->PIO_SODR = BUT_1_PIO_IDX_MASK;
+	BUZZER_PIO->PIO_SODR = BUZZER_PIO_IDX_MASK;
 }
 
 void clear_buzzer() {
-	BUT_1_PIO->PIO_CODR = BUT_1_PIO_IDX_MASK;
+	BUZZER_PIO->PIO_CODR = BUZZER_PIO_IDX_MASK;
 }
 
 void tone(int freq, int time) {
@@ -203,35 +221,32 @@ static void task_motor(void *pvParameters) {
 		}
 	}
 }
-
-static void task_coin(void *pvParameters) {
-	int but;
-	for(;;)
-	{
-		if(xQueueReceive(xQueueCoin, &but, 0))
-		{
-			xQueueSend(xQueuePlay, &but, 0);
-		}
-	}
-}
 	
-static void task_play(void *pvParameters) {
-	tone(NOTE_B5,  80);
-	tone(NOTE_E6, 640);
-}
+void task_coins(void *pvParameters) {
+	int coinValue;
+	while (1) {
+		if (xSemaphoreTake(xBtnSemaphore, portMAX_DELAY) == pdTRUE) {
 
-
-static void task_but(void *pvParameters)
-{
-	int but;
-	for(;;)
-	{
-		if(xQueueReceive(xQueueBut, &but, 0))
-		{
-			xQueueSend(xQueueSenha, &but, 0);
+			// Adicione 1 ao número gerado para obter um valor entre 1 e 3.
+			int coinValue = 1;
+			xQueueSend(xQueueCoins, &coinValue, portMAX_DELAY);
 		}
 	}
 }
+
+void task_play(void *pvParameters) {
+	int coinValue;
+	while (1) {
+		if (xQueueReceive(xQueueCoins, &coinValue, portMAX_DELAY)) {
+			tone(NOTE_B5,  80);
+			for (int i = 0; i < coinValue+1; i++){
+				tone(NOTE_B5,  80);
+				tone(NOTE_E6, 640);
+			}
+		}
+	}
+}
+
 
 /************************/
 /* funcoes                                                              */
@@ -264,6 +279,7 @@ static void BUT_OLED_init(void){
 	
 	pio_enable_interrupt(BUT_1_PIO, BUT_1_PIO_IDX_MASK);
 	pio_get_interrupt_status(BUT_1_PIO);
+	pmc_enable_periph_clk(BUZZER_PIO_ID);
 
 	NVIC_EnableIRQ(BUT_1_PIO_ID);
 	NVIC_SetPriority(BUT_1_PIO_ID, 4); // Prioridade 4
@@ -297,6 +313,9 @@ static void BUT_OLED_init(void){
 
 	NVIC_EnableIRQ(BUT_3_PIO_ID);
 	NVIC_SetPriority(BUT_3_PIO_ID, 4); // Prioridade 4
+	
+	NVIC_EnableIRQ(BUZZER_PIO_ID);
+	NVIC_SetPriority(BUZZER_PIO_ID, 4); // Prioridade 4
 }
 
 static void MOTOR_init(void){
@@ -304,6 +323,7 @@ static void MOTOR_init(void){
 	pio_set_output(IN2_PIO, IN2_PIO_PIN_MASK, 0,0,0);
 	pio_set_output(IN3_PIO, IN3_PIO_PIN_MASK, 0,0,0);
 	pio_set_output(IN4_PIO, IN4_PIO_PIN_MASK, 0,0,0);
+	pio_set_output(BUZZER_PIO,BUZZER_PIO_IDX_MASK, 0, 0, 0);
 }
 
 static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource) {
@@ -371,7 +391,7 @@ int main(void) {
 	/* Initialize the SAM system */
 	sysclk_init();
 	board_init();
-	
+	BUT_OLED_init();
 	
 
 	/* Initialize the console uart */
@@ -381,8 +401,8 @@ int main(void) {
 	if (xQueueModo == NULL)
 	printf("falha em criar a queue \n");
 	
-	xQueueCoin = xQueueCreate(32, sizeof(uint32_t));
-	if (xQueueCoin == NULL)
+	xQueueCoins = xQueueCreate(32, sizeof(uint32_t));
+	if (xQueueCoins == NULL)
 	printf("falha em criar a queue \n");
 
 	xQueuePlay = xQueueCreate(32, sizeof(uint32_t));
@@ -392,7 +412,8 @@ int main(void) {
 	xQueueSteps = xQueueCreate(32, sizeof(uint32_t));
 	if (xQueueSteps == NULL)
 	printf("falha em criar a queue \n");
-
+	
+	xBtnSemaphore = xSemaphoreCreateBinary();
 	xSemaphoreRTT = xSemaphoreCreateBinary();
 	if (xSemaphoreRTT == NULL)
 	printf("falha em criar o semaforo \n");
@@ -404,9 +425,16 @@ int main(void) {
 	if (xTaskCreate(task_motor, "motor", TASK_MOTOR_STACK_SIZE, NULL, TASK_MOTOR_STACK_PRIORITY, NULL) != pdPASS) {
 		printf("Failed to create motor task\r\n");
 	}
+	if (xTaskCreate(task_coins, "coins", TASK_COINS_STACK_SIZE, NULL, TASK_COINS_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create coins task\r\n");
+	}
+	if (xTaskCreate(task_play, "play", TASK_PLAY_STACK_SIZE, NULL, TASK_PLAY_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create play task\r\n");
+	}
 
 	BUT_OLED_init();
 	MOTOR_init();
+	
 	
 	/* Start the scheduler. */
 	vTaskStartScheduler();
